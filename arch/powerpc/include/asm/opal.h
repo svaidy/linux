@@ -151,8 +151,8 @@ struct opal_sg_list {
 #define OPAL_HANDLE_HMI				98
 #define OPAL_REGISTER_DUMP_REGION		101
 #define OPAL_UNREGISTER_DUMP_REGION		102
-#define OPAL_IPMI_SEND				106
-#define OPAL_IPMI_RECV				107
+#define OPAL_IPMI_SEND				107
+#define OPAL_IPMI_RECV				108
 
 #ifndef __ASSEMBLY__
 
