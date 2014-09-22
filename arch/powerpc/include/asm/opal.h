@@ -151,6 +151,8 @@ struct opal_sg_list {
 #define OPAL_HANDLE_HMI				98
 #define OPAL_REGISTER_DUMP_REGION		101
 #define OPAL_UNREGISTER_DUMP_REGION		102
+#define OPAL_IPMI_SEND				106
+#define OPAL_IPMI_RECV				107
 
 #ifndef __ASSEMBLY__
 
@@ -415,6 +417,17 @@ struct opal_msg {
 	__be32 msg_type;
 	__be32 reserved;
 	__be64 params[8];
+};
+
+enum {
+	OPAL_IPMI_MSG_FORMAT_VERSION_1 = 1,
+};
+
+struct opal_ipmi_msg {
+	uint8_t		version;
+	uint8_t		netfn;
+	uint8_t		cmd;
+	uint8_t		data[];
 };
 
 struct opal_machine_check_event {
@@ -924,6 +937,10 @@ int64_t opal_sensor_read(uint32_t sensor_hndl, int token, __be32 *sensor_data);
 int64_t opal_handle_hmi(void);
 int64_t opal_register_dump_region(uint32_t id, uint64_t start, uint64_t end);
 int64_t opal_unregister_dump_region(uint32_t id);
+int64_t opal_ipmi_send(uint64_t interface, struct opal_ipmi_msg *msg,
+		uint64_t msg_len);
+int64_t opal_ipmi_recv(uint64_t interface, struct opal_ipmi_msg *msg,
+		uint64_t *msg_len);
 
 /* Internal functions */
 extern int early_init_dt_scan_opal(unsigned long node, const char *uname,
