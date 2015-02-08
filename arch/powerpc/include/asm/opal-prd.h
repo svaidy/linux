@@ -20,26 +20,31 @@
 #ifndef _UAPI_LINUX_OPAL_DIAG_H_
 #define _UAPI_LINUX_OPAL_DIAG_H_
 
+#define OPAL_PRD_VERSION		1
+#define OPAL_PRD_RANGE_NAME_LEN		32
+#define OPAL_PRD_MAX_RANGES		8
 
-/* IOCTLs for /dev/opal-diag */
+struct opal_prd_range {
+	char		name[OPAL_PRD_RANGE_NAME_LEN];
+	uint64_t	physaddr;
+	uint64_t	size;
+};
 
-struct opald_scom {
+struct opal_prd_info {
+	uint64_t		version;
+	uint64_t		code_size;
+	struct opal_prd_range	ranges[OPAL_PRD_MAX_RANGES];
+
+};
+
+struct opal_prd_scom {
 	uint64_t chip;
 	uint64_t addr;
 	uint64_t data;
 };
 
-#define MAX_NAME_LEN	128	/* Keep 128 bytes to copy the string */
-
-struct opald_mem {
-	char name[MAX_NAME_LEN];
-	uint64_t addr;
-	uint64_t size;
-};
-
-#define OPALD_SCOM_READ		_IOR('o', 0x10, struct opald_scom)
-#define OPALD_SCOM_WRITE	_IOW('o', 0x11, struct opald_scom)
-#define OPALD_GET_MAP_SIZE	_IOR('o', 0x01, unsigned long)
-#define OPALD_GET_RESERVED_MEM	_IOWR('o', 0x02, struct opald_mem)
+#define OPAL_PRD_GET_INFO	_IOR('o', 0x01, struct opal_prd_info)
+#define OPAL_PRD_SCOM_READ	_IOR('o', 0x10, struct opal_prd_scom)
+#define OPAL_PRD_SCOM_WRITE	_IOW('o', 0x11, struct opal_prd_scom)
 
 #endif

@@ -18,6 +18,9 @@
  * GNU General Public License for more details.
  */
 
+#define pr_fmt(fmt) "opal-prd: " fmt
+#define DEBUG
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/miscdevice.h>
@@ -28,44 +31,32 @@
 #include <asm/opal-prd.h>
 #include <asm/opal.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>        /* for get_user and put_user */
+#include <asm/uaccess.h>
 
-#define	MAX_OPAL_DIAG_REGIONS	3
+static struct opal_prd_range ranges[OPAL_PRD_MAX_RANGES];
 
-/* 
- * FIXME:  name can hold pointer into device tree. But what if
- * this property gets updated at runtime? Avoid dangling pointer.
- */
-
-#define MAP_COPY	0x01	/* Map a RW copy in kernel memory */
-struct opal_diag_mem_regions {
-	char name[MAX_NAME_LEN];
-	u8 flags;
-	u64 addr;
-	u64 size;
-	void *alloc_buf;
-	u64 copy_addr;
-	u64 copy_size;
-	u64 mmap_addr;
-	u64 mmap_size;
-};
-
-struct opal_diag_info {
-	int nr_mem_regions;
-	struct opal_diag_mem_regions mem_regions[MAX_OPAL_DIAG_REGIONS];
-};
-
-static struct opal_diag_info opal_diag;
-
-static int opal_diag_open(struct inode *inode, struct file *file)
+static struct opal_prd_range *find_range_by_addr(uint64_t addr)
 {
+	struct opal_prd_range *range;
+	unsigned int i;
 
-	printk("opal_diag_open called\n");
+	for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
+		range = &ranges[i];
+		if (addr >= range->physaddr &&
+				addr < range->physaddr + range->size)
+			return range;
+	}
+
+	return NULL;
+}
+
+static int opal_prd_open(struct inode *inode, struct file *file)
+{
 	return 0;
 }
 
 /*
- * opal_diag_mmap - maps the hbrt binary into userspace
+ * opal_prd_mmap - maps the hbrt binary into userspace
  * @file: file structure for the device
  * @vma: VMA to map the registers into
  */
@@ -75,287 +66,235 @@ static int opal_diag_open(struct inode *inode, struct file *file)
  * [6290324582,5]   0x00effd6b5000..00effd6fffff : ibm,hbrt-target-image
  * [6290330588,5]   0x00effd700000..00effd7fffff : ibm,hbrt-vpd-image
 */
-static int opal_diag_mmap(struct file *file, struct vm_area_struct *vma)
+static int opal_prd_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	u64 total_mmap_size = 0;
-	u64 size, offset = 0;
-	int i, rc;
+	struct opal_prd_range *range;
+	size_t addr, size;
+	int rc;
 
-	printk("opal_diag_mmap called\n");
-	printk("opal_diag_mmap start %016llx end %016llx\n", vma->vm_start, vma->vm_end);
+	pr_debug("opal_prd_mmap(0x%016lx, 0x%016lx, 0x%lx, 0x%lx)\n",
+			vma->vm_start, vma->vm_end, vma->vm_pgoff,
+			vma->vm_flags);
 
-	/* Compute total size required */
-	for (i = 0; i < opal_diag.nr_mem_regions; i++) {
-		total_mmap_size += opal_diag.mem_regions[i].mmap_size;
-	}
+	/* We don't allow writeable shared mappings - this would alter the
+	 * underlying HBRT memory */
+	if ((vma->vm_flags & VM_WRITE) && (vma->vm_flags & VM_SHARED))
+		return -EPERM;
 
-	if (vma->vm_end - vma->vm_start < total_mmap_size)
+	addr = vma->vm_pgoff << PAGE_SHIFT;
+	size = vma->vm_end - vma->vm_start;
+
+	/* ensure we're mapping within one of the allowable ranges */
+	range = find_range_by_addr(addr);
+	if (!range)
+		return -EINVAL;
+
+	if (addr + size > range->physaddr + range->size)
 		return -EINVAL;
 
 	vma->vm_page_prot = phys_mem_access_prot(file, vma->vm_pgoff,
-						 total_mmap_size,
-						 vma->vm_page_prot);
+						 size, vma->vm_page_prot)
+				| _PAGE_SPECIAL;
 
-	for (i = 0; i < opal_diag.nr_mem_regions; i++) {
+	rc = remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff, size,
+			vma->vm_page_prot);
 
-		if (opal_diag.mem_regions[i].flags & MAP_COPY) {
-			opal_diag.mem_regions[i].copy_size = 
-				(opal_diag.mem_regions[i].size + PAGE_SIZE-1) &
-					~(PAGE_SIZE-1);
-					
-			opal_diag.mem_regions[i].mmap_size = 
-				opal_diag.mem_regions[i].copy_size;
-			/* Alloc 1 more page for align up */
-			/* FIXME: Use vmalloc and map each page */
-			opal_diag.mem_regions[i].alloc_buf =
-					kmalloc(opal_diag.mem_regions[i].copy_size
-						+ PAGE_SIZE, GFP_KERNEL);
-			/* Page align the mapping source address */		
-			opal_diag.mem_regions[i].copy_addr =
-				((u64) opal_diag.mem_regions[i].alloc_buf + PAGE_SIZE-1)
-				& ~(PAGE_SIZE-1);
-
-			BUG_ON(!opal_diag.mem_regions[i].copy_addr);		
-			memcpy(opal_diag.mem_regions[i].copy_addr,
-				phys_to_virt(opal_diag.mem_regions[i].addr),
-				opal_diag.mem_regions[i].size
-			
-			);
-					
-			rc = remap_pfn_range(vma, vma->vm_start + offset,
-				virt_to_phys(opal_diag.mem_regions[i].copy_addr) >> PAGE_SHIFT,
-				opal_diag.mem_regions[i].copy_size, vma->vm_page_prot);
-			
-			opal_diag.mem_regions[i].mmap_addr = vma->vm_start + offset;
-			offset += opal_diag.mem_regions[i].copy_size;
-
-		} else {
-			rc = remap_pfn_range(vma, vma->vm_start + offset,
-				opal_diag.mem_regions[i].addr >> PAGE_SHIFT,
-				opal_diag.mem_regions[i].mmap_size, vma->vm_page_prot);
-			
-			opal_diag.mem_regions[i].mmap_addr = vma->vm_start + offset;
-			offset += opal_diag.mem_regions[i].mmap_size;
-		}
-
-		if (rc)
-			break;
-	}
-	printk("opal_diag_mmap rc = %d\n", rc);
 	return rc;
-
 }
 
-static int opal_diag_ioctl(struct file *file, unsigned long cmd, void *param)
+static long opal_prd_ioctl(struct file *file, unsigned int cmd,
+		unsigned long param)
 {
+	struct opal_prd_info info;
+	struct opal_prd_scom scom;
+	int rc = 0;
 
 	switch(cmd) {
-
-	case OPALD_GET_MAP_SIZE:
-	{
-		unsigned long size = 0;
-		int i;
-		if(!param)
-			return -EINVAL;
-		/* Compute total size required */
-		for (i = 0; i < opal_diag.nr_mem_regions; i++) {
-			size += opal_diag.mem_regions[i].mmap_size;
-		}
-
-		copy_to_user((unsigned long __user *) param,
-				&size, sizeof(unsigned long));
-
-		printk("opald ioctl GET_MAP_SIZE returned %p\n", size);
-		return 0;
-	}
-	case OPALD_GET_RESERVED_MEM:
-	{
-		struct opald_mem mem;
-		int i;
-		int rc = -EINVAL;
-		if (!param)
-			return -EINVAL;
-		copy_from_user(&mem, (struct opald_mem __user *) param,
-				sizeof(struct opald_mem));
-
-		for (i = 0; i < opal_diag.nr_mem_regions; i++) {
-			if (strncmp(opal_diag.mem_regions[i].name,
-				mem.name, MAX_NAME_LEN) == 0) {
-				mem.addr = opal_diag.mem_regions[i].mmap_addr;
-				/* Add offset within page */
-				mem.addr += opal_diag.mem_regions[i].addr &
-						(PAGE_SIZE-1);
-				mem.size = opal_diag.mem_regions[i].mmap_size;
-				rc = 0;
-				break;
-			}
-		}
-
-		copy_to_user((struct opald_mem __user *) param,
-				&mem, sizeof(struct opald_mem));
-
-		printk("opald ioctl GET_RESERVED_MEM Name %s, addr %p size %p\n",
-					mem.name, mem.addr, mem.size);	
-		return rc;
-	}
-	case OPALD_SCOM_READ:
-	{
-		struct opald_scom scom;
-		uint64_t rc;
-		if (!param)
-			return -EINVAL;
-
-		copy_from_user(&scom, (struct opald_scom __user *) param,
-				sizeof(struct opald_scom));
-
-		rc = opal_xscom_read(scom.chip, scom.addr, (__be64 *) &scom.data);
-		printk("opald ioctl SCOM_READ: chip %x addr %016llx data %016llx rc %d\n",
-			scom.chip, scom.addr, scom.data, rc);
-
-		copy_to_user((struct opald_mem __user *) param,
-				&scom, sizeof(struct opald_scom));
-
+	case OPAL_PRD_GET_INFO:
+		info.version = OPAL_PRD_VERSION;
+		memcpy(&info.ranges, ranges, sizeof(info.ranges));
+		rc = copy_to_user((void __user *)param, &info, sizeof(info));
 		if (rc)
-			return -EINVAL;
-			
-		return 0;
-	}
-	case OPALD_SCOM_WRITE:
-	{
-		struct opald_scom scom;
-		uint64_t rc;
-		if (!param)
-			return -EINVAL;
+			return -EFAULT;
+		break;
 
-		copy_from_user(&scom, (struct opald_scom __user *) param,
-				sizeof(struct opald_scom));
+	case OPAL_PRD_SCOM_READ:
+		rc = copy_from_user(&scom, (void __user *)param, sizeof(scom));
+		if (!rc)
+			return -EFAULT;
+
+		rc = opal_xscom_read(scom.chip, scom.addr,
+				(__be64 *)&scom.data);
+		pr_debug("ioctl SCOM_READ: chip %llx addr %016llx "
+				"data %016llx rc %d\n",
+				scom.chip, scom.addr, scom.data, rc);
+		if (rc)
+			return -EIO;
+
+		rc = copy_to_user((void __user *)param, &scom, sizeof(scom));
+		if (rc)
+			return -EFAULT;
+		break;
+
+	case OPAL_PRD_SCOM_WRITE:
+		rc = copy_from_user(&scom, (void __user *)param, sizeof(scom));
+		if (rc)
+			return -EFAULT;
 
 		rc = opal_xscom_write(scom.chip, scom.addr, scom.data);
-		printk("opald ioctl SCOM_WRITE: chip %x addr %016llx data %016llx rc %d\n",
-			scom.chip, scom.addr, scom.data, rc);
-
+		pr_debug("ioctl SCOM_WRITE: chip %llx addr %016llx "
+				"data %016llx rc %d\n",
+				scom.chip, scom.addr, scom.data, rc);
 		if (rc)
-			return -EINVAL;
-			
-		return 0;
-	}
+			return -EIO;
+
+		break;
 
 	default:
-		return -EINVAL;
-	}	
+		rc = -EINVAL;
+	}
+
+	return rc;
 }
 
-struct file_operations opal_diag_fops = {
-	.open           = opal_diag_open,
-	.mmap          = opal_diag_mmap,
-	.unlocked_ioctl = opal_diag_ioctl,
+struct file_operations opal_prd_fops = {
+	.open		= opal_prd_open,
+	.mmap		= opal_prd_mmap,
+	.unlocked_ioctl	= opal_prd_ioctl,
 	.owner		= THIS_MODULE,
 };
 
-// This structure has entry for device id and event number need more info
-
-static struct miscdevice opal_diag_dev = {
-        .minor = MISC_DYNAMIC_MINOR,
-        .name = "opal-diag",
-        .fops = &opal_diag_fops,
+static struct miscdevice opal_prd_dev = {
+        .minor		= MISC_DYNAMIC_MINOR,
+        .name		= "opal-prd",
+        .fops		= &opal_prd_fops,
 };
 
-
-static void get_regions_from_dt(void)
+static bool is_prd_range(const char *name)
 {
-	struct device_node *np;
-	const char *prop_names;
-	char *p, *end;
-	const __be32 *prop_ranges;
-	u32 val[4];
-	unsigned int len_names, len_ranges;
-	int nr_ranges, i, count, index;
-	u64 mmap_size;
-
-	printk("OPAL DIAG: Parsing Device Tree\n");
-	np = of_find_node_by_path("/");
-	if (!np)
-		return;
-
-	nr_ranges = of_property_count_strings(np, "reserved-names");
-	if (nr_ranges < 0)
-		return;
-			
-	count = of_property_count_u32_elems(np, "reserved-ranges");
-	if (count != nr_ranges *4) {
-		printk("DT has incorrect %d reserved-names and %d reserved-ranges\n",
-			nr_ranges, count);
-		return;
-	}
-
-	prop_ranges = of_get_property(np, "reserved-ranges", &len_ranges);
-	if (!prop_ranges)
-		return;
-
-	for (i = 0; i < nr_ranges; i++) {
-		of_property_read_string_index(np, "reserved-names", i, &p);	
-		if (strstr(p, "hbrt")) { /* Pick HBRT areas */
-			index = opal_diag.nr_mem_regions;
-			opal_diag.mem_regions[index].addr =
-				of_read_number(prop_ranges + 4*i+0, 2);
-			opal_diag.mem_regions[index].size =
-				of_read_number(prop_ranges + 4*i+2, 2);
-			strncpy(opal_diag.mem_regions[index].name, p, MAX_NAME_LEN-1);
-			/* Detect special flags */
-			if (strcmp(p, "ibm,hbrt-code-image") == 0) {
-				/* Mark as a copy map */
-				opal_diag.mem_regions[index].flags |= MAP_COPY;
-			}
-			opal_diag.nr_mem_regions++;
-			BUG_ON(opal_diag.nr_mem_regions > MAX_OPAL_DIAG_REGIONS);
-		}
-	}
-	of_node_put(np);
-
-	/* Lets see what we gathered */
-	for (i = 0; i < opal_diag.nr_mem_regions; i++) {
-		/* Compute mmap size for application */
-		/* Add offset within page size */
-		mmap_size = opal_diag.mem_regions[i].size +
-			(opal_diag.mem_regions[i].addr & (PAGE_SIZE-1));
-		/* Round up to next page size */
-		mmap_size = (mmap_size + PAGE_SIZE-1) & ~(PAGE_SIZE-1);
-		opal_diag.mem_regions[i].mmap_size = mmap_size;
-
-		printk("Name: %25s Addr %016llx Size %016llx MMap size %016llx\n",
-			opal_diag.mem_regions[i].name,
-			opal_diag.mem_regions[i].addr,
-			opal_diag.mem_regions[i].size,
-			opal_diag.mem_regions[i].mmap_size);
-	}
+	return true;
 }
 
-/*
- *Initialize the module - Register the character device
- */
-int __init opal_diag_init(void)
+#ifdef DEBUG
+static void create_test_range(int idx)
 {
-	int rc;
-	//Register the character device
-	// Negative values signify an error
-	if (misc_register(&opal_diag_dev)) {
-		printk(KERN_ERR "prd_init: failed to register device\n");
-		return rc;
+	struct opal_prd_range *range;
+	struct page *page;
+
+	if (idx >= OPAL_PRD_MAX_RANGES) {
+		pr_debug("Not adding debug page: no ranges left\n");
+		return;
 	}
-	get_regions_from_dt();
+
+	range = &ranges[idx];
+
+	page = alloc_page(GFP_KERNEL);
+	if (!page) {
+		pr_debug("Not adding debug page: page allocation failed\n");
+		return;
+	}
+
+	strcpy(range->name, "test");
+	range->physaddr = page_to_phys(page);
+	range->size = PAGE_SIZE;
+	memcpy(phys_to_virt(range->physaddr), "test", 5);
+
+}
+#else
+static void create_test_range(int idx) { }
+#endif
+
+
+/**
+ * Find the HBRT code region in reserved-ranges and set code_region_physaddr
+ * and code_region_size accordingly.
+ */
+static int parse_regions(void)
+{
+	const __be32 *ranges_prop;
+	int i, n, rc, nr_ranges;
+	struct device_node *np;
+	const char *name;
+
+	np = of_find_node_by_path("/");
+	if (!np)
+		return -ENODEV;
+
+	nr_ranges = of_property_count_strings(np, "reserved-names");
+	ranges_prop = of_get_property(np, "reserved-ranges", NULL);
+	if (!ranges_prop) {
+		of_node_put(np);
+		return -ENODEV;
+	}
+
+	for (i = 0, n = 0; i < nr_ranges; i++) {
+		uint64_t addr, size;
+
+		rc = of_property_read_string_index(np, "reserved-names", i,
+				&name);
+		if (rc)
+			continue;
+
+		if (strlen(name) >= OPAL_PRD_RANGE_NAME_LEN)
+			continue;
+
+		if (!is_prd_range(name))
+			continue;
+
+		addr = of_read_number(ranges_prop, i * 4);
+		size = PAGE_ALIGN(of_read_number(ranges_prop, i * 4 + 2));
+
+		if (addr & (PAGE_SIZE - 1)) {
+			pr_warn("skipping range %s: not page-aligned\n",
+					name);
+			continue;
+		}
+
+		if (n == OPAL_PRD_MAX_RANGES) {
+			pr_warn("Too many PRD ranges! Skipping %s\n", name);
+		} else {
+			strncpy(ranges[n].name, name,
+					OPAL_PRD_RANGE_NAME_LEN - 1);
+			ranges[n].physaddr = addr;
+			ranges[n].size = size;
+			n++;
+		}
+	}
+
+	of_node_put(np);
+
+	create_test_range(n);
+
 	return 0;
 }
 
-//Cleanup - unregister the appropriate file from /proc
-void __exit opal_diag_cleanup(void)
+static int __init opal_prd_init(void)
 {
-	/* FIXME: Free kmalloc memory */	
-	misc_deregister(&opal_diag_dev);
+	int rc;
 
+	/* parse the code region information from the device tree */
+	rc = parse_regions();
+	if (rc) {
+		pr_err("Couldn't parse region information from DT\n");
+		return rc;
+	}
+
+	rc = misc_register(&opal_prd_dev);
+	if (rc) {
+		pr_err("failed to register miscdev\n");
+		return rc;
+	}
+
+	return 0;
 }
 
-module_init(opal_diag_init);
-module_exit(opal_diag_cleanup);
+static void __exit opal_prd_exit(void)
+{
+	misc_deregister(&opal_prd_dev);
+}
+
+module_init(opal_prd_init);
+module_exit(opal_prd_exit);
 
 MODULE_DESCRIPTION("PowerNV OPAL runtime diagnostic driver");
 MODULE_LICENSE("GPL");
