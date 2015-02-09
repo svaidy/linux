@@ -43,6 +43,7 @@ struct opal_prd_msg_queue_item {
 static LIST_HEAD(opal_prd_msg_queue);
 static DEFINE_SPINLOCK(opal_prd_msg_queue_lock);
 static DECLARE_WAIT_QUEUE_HEAD(opal_prd_msg_wait);
+static atomic_t usage;
 
 static struct opal_prd_range *find_range_by_addr(uint64_t addr)
 {
@@ -61,6 +62,9 @@ static struct opal_prd_range *find_range_by_addr(uint64_t addr)
 
 static int opal_prd_open(struct inode *inode, struct file *file)
 {
+	if (atomic_inc_return(&usage) == 1)
+		return -EBUSY;
+
 	return 0;
 }
 
@@ -175,6 +179,44 @@ static ssize_t opal_prd_read(struct file *file, char __user *buf,
 	return size;
 }
 
+static ssize_t opal_prd_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	struct opal_prd_msg msg;
+	ssize_t size;
+	int rc;
+
+	size = sizeof(msg);
+
+	if (count < size)
+		return -EINVAL;
+
+	rc = copy_from_user(&msg, buf, sizeof(msg));
+	if (rc)
+		return -EFAULT;
+
+	rc = opal_prd_msg(&msg);
+	if (rc) {
+		pr_warn("write: opal_prd_msg returned %d\n", rc);
+		return -EIO;
+	}
+
+	return size;
+}
+
+static int opal_prd_release(struct inode *inode, struct file *file)
+{
+	struct opal_prd_msg msg;
+
+	msg.type = OPAL_PRD_MSG_TYPE_FINI;
+	msg.token = 0;
+
+	opal_prd_msg(&msg);
+	atomic_dec(&usage);
+
+	return 0;
+}
+
 
 static long opal_prd_ioctl(struct file *file, unsigned int cmd,
 		unsigned long param)
@@ -235,7 +277,9 @@ struct file_operations opal_prd_fops = {
 	.open		= opal_prd_open,
 	.mmap		= opal_prd_mmap,
 	.read		= opal_prd_read,
+	.write		= opal_prd_write,
 	.unlocked_ioctl	= opal_prd_ioctl,
+	.release	= opal_prd_release,
 	.owner		= THIS_MODULE,
 };
 
@@ -246,7 +290,7 @@ static struct miscdevice opal_prd_dev = {
 };
 
 /* opal interface */
-static int opal_prd_msg(struct notifier_block *nb,
+static int opal_prd_msg_notifier(struct notifier_block *nb,
 		unsigned long msg_type, void *_msg)
 {
 	struct opal_prd_msg_queue_item *item;
@@ -270,7 +314,7 @@ static int opal_prd_msg(struct notifier_block *nb,
 }
 
 static struct notifier_block opal_prd_event_nb = {
-	.notifier_call	= opal_prd_msg,
+	.notifier_call	= opal_prd_msg_notifier,
 	.next		= NULL,
 	.priority	= 0,
 };

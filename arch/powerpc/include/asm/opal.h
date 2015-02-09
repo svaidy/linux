@@ -154,6 +154,7 @@ struct opal_sg_list {
 #define OPAL_IPMI_SEND				107
 #define OPAL_IPMI_RECV				108
 #define OPAL_I2C_REQUEST			109
+#define OPAL_PRD_MSG				110
 
 #ifndef __ASSEMBLY__
 
@@ -800,18 +801,38 @@ struct opal_i2c_request {
 };
 
 enum opal_prd_msg_type {
-	OPAL_PRD_MSG_TYPE_ATTN = 0,
+	OPAL_PRD_MSG_TYPE_INIT = 0,	/* RT --> FW */
+	OPAL_PRD_MSG_TYPE_FINI,		/* RT --> FW */
+	OPAL_PRD_MSG_TYPE_ATTN,		/* RT <-- FW */
+	OPAL_PRD_MSG_TYPE_ATTN_ACK,	/* RT --> FW */
+	OPAL_PRD_MSG_TYPE_OCC_ERROR,	/* RT <-- FW */
+	OPAL_PRD_MSG_TYPE_OCC_RESET,	/* RT <-- FW */
 };
 
 struct opal_prd_msg {
 	uint8_t		type;
-	uint8_t		pad[7];
+	uint8_t		pad[3];
+	uint32_t	token;
 	union {
+		struct {
+			uint32_t	version;
+			uint64_t	ipoll;
+		} init;
 		struct {
 			uint64_t	proc;
 			uint64_t	ipoll_status;
 			uint64_t	ipoll_mask;
 		} attn;
+		struct {
+			uint64_t	proc;
+			uint64_t	ipoll_ack;
+		} attn_ack;
+		struct {
+			uint64_t	chip;
+		} occ_error;
+		struct {
+			uint64_t	chip;
+		} occ_reset;
 	};
 };
 
@@ -979,6 +1000,7 @@ int64_t opal_ipmi_recv(uint64_t interface, struct opal_ipmi_msg *msg,
 		uint64_t *msg_len);
 int64_t opal_i2c_request(uint64_t async_token, uint32_t bus_id,
 			 struct opal_i2c_request *oreq);
+int64_t opal_prd_msg(struct opal_prd_msg *msg);
 
 /* Internal functions */
 extern int early_init_dt_scan_opal(unsigned long node, const char *uname,
