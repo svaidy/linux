@@ -35,6 +35,15 @@
 
 static struct opal_prd_range ranges[OPAL_PRD_MAX_RANGES];
 
+struct opal_prd_msg_queue_item {
+	struct opal_prd_msg	msg;
+	struct list_head	list;
+};
+
+static LIST_HEAD(opal_prd_msg_queue);
+static DEFINE_SPINLOCK(opal_prd_msg_queue_lock);
+static DECLARE_WAIT_QUEUE_HEAD(opal_prd_msg_wait);
+
 static struct opal_prd_range *find_range_by_addr(uint64_t addr)
 {
 	struct opal_prd_range *range;
@@ -102,6 +111,71 @@ static int opal_prd_mmap(struct file *file, struct vm_area_struct *vma)
 	return rc;
 }
 
+static bool opal_msg_queue_empty(void)
+{
+	unsigned long flags;
+	bool ret;
+
+	spin_lock_irqsave(&opal_prd_msg_queue_lock, flags);
+	ret = list_empty(&opal_prd_msg_queue);
+	spin_unlock_irqrestore(&opal_prd_msg_queue_lock, flags);
+
+	return ret;
+}
+
+static ssize_t opal_prd_read(struct file *file, char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	struct opal_prd_msg_queue_item *item;
+	unsigned long flags;
+	ssize_t size;
+	int rc;
+
+	size = sizeof(item->msg);
+
+	if (count < size)
+		return -EINVAL;
+
+	if (*ppos)
+		return -ESPIPE;
+
+	item = NULL;
+
+	for (;;) {
+
+		spin_lock_irqsave(&opal_prd_msg_queue_lock, flags);
+		if (!list_empty(&opal_prd_msg_queue)) {
+			item = list_first_entry(&opal_prd_msg_queue,
+					struct opal_prd_msg_queue_item, list);
+			list_del(&item->list);
+		}
+		spin_unlock_irqrestore(&opal_prd_msg_queue_lock, flags);
+
+		if (item)
+			break;
+
+		if (file->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+
+		rc = wait_event_interruptible(opal_prd_msg_wait,
+				!opal_msg_queue_empty());
+		if (rc)
+			return -EINTR;
+	}
+
+	rc = copy_to_user(buf, &item->msg, size);
+	if (rc) {
+		/* eep! re-queue at the head of the list */
+		spin_lock_irqsave(&opal_prd_msg_queue_lock, flags);
+		list_add(&item->list, &opal_prd_msg_queue);
+		spin_unlock_irqrestore(&opal_prd_msg_queue_lock, flags);
+		return -EFAULT;
+	}
+
+	return size;
+}
+
+
 static long opal_prd_ioctl(struct file *file, unsigned int cmd,
 		unsigned long param)
 {
@@ -160,6 +234,7 @@ static long opal_prd_ioctl(struct file *file, unsigned int cmd,
 struct file_operations opal_prd_fops = {
 	.open		= opal_prd_open,
 	.mmap		= opal_prd_mmap,
+	.read		= opal_prd_read,
 	.unlocked_ioctl	= opal_prd_ioctl,
 	.owner		= THIS_MODULE,
 };
@@ -168,6 +243,36 @@ static struct miscdevice opal_prd_dev = {
         .minor		= MISC_DYNAMIC_MINOR,
         .name		= "opal-prd",
         .fops		= &opal_prd_fops,
+};
+
+/* opal interface */
+static int opal_prd_msg(struct notifier_block *nb,
+		unsigned long msg_type, void *_msg)
+{
+	struct opal_prd_msg_queue_item *item;
+	struct opal_msg *msg = _msg;
+	unsigned long flags;
+
+	if (msg_type != OPAL_MSG_PRD)
+		return 0;
+
+	item = kzalloc(sizeof(*item), GFP_ATOMIC);
+	if (!item)
+		return -ENOMEM;
+
+	memcpy(&item->msg, msg->params, sizeof(item->msg));
+
+	spin_lock_irqsave(&opal_prd_msg_queue_lock, flags);
+	list_add_tail(&item->list, &opal_prd_msg_queue);
+	spin_unlock_irqrestore(&opal_prd_msg_queue_lock, flags);
+
+	return 0;
+}
+
+static struct notifier_block opal_prd_event_nb = {
+	.notifier_call	= opal_prd_msg,
+	.next		= NULL,
+	.priority	= 0,
 };
 
 static bool is_prd_range(const char *name)
@@ -276,6 +381,12 @@ static int __init opal_prd_init(void)
 	rc = parse_regions();
 	if (rc) {
 		pr_err("Couldn't parse region information from DT\n");
+		return rc;
+	}
+
+	rc = opal_message_notifier_register(OPAL_MSG_PRD, &opal_prd_event_nb);
+	if (rc) {
+		pr_err("Couldn't register event notifier\n");
 		return rc;
 	}
 

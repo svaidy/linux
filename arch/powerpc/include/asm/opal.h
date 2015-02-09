@@ -252,6 +252,7 @@ enum OpalMessageType {
 	OPAL_MSG_EPOW,
 	OPAL_MSG_SHUTDOWN,
 	OPAL_MSG_HMI_EVT,
+	OPAL_MSG_PRD,
 	OPAL_MSG_TYPE_MAX,
 };
 
@@ -796,6 +797,22 @@ struct opal_i2c_request {
 	__be32 subaddr;		/* Sub-address if any */
 	__be32 size;			/* Data size */
 	__be64 buffer_ra;		/* Buffer real address */
+};
+
+enum opal_prd_msg_type {
+	OPAL_PRD_MSG_TYPE_ATTN = 0,
+};
+
+struct opal_prd_msg {
+	uint8_t		type;
+	uint8_t		pad[7];
+	union {
+		struct {
+			uint64_t	proc;
+			uint64_t	ipoll_status;
+			uint64_t	ipoll_mask;
+		} attn;
+	};
 };
 
 /* /sys/firmware/opal */

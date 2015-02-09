@@ -47,4 +47,10 @@ struct opal_prd_scom {
 #define OPAL_PRD_SCOM_READ	_IOR('o', 0x10, struct opal_prd_scom)
 #define OPAL_PRD_SCOM_WRITE	_IOW('o', 0x11, struct opal_prd_scom)
 
+/* read/write interface for events */
+struct opal_prd_attn_response {
+	uint64_t	proc;
+	uint64_t	ipoll_unmask;
+};
+
 #endif
