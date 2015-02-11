@@ -74,11 +74,6 @@ static int opal_prd_open(struct inode *inode, struct file *file)
  * @vma: VMA to map the registers into
  */
 
-/* Tested on ltctul57a where:
- * [6290319034,5]   0x00effd568000..00effd6b4fff : ibm,hbrt-code-image
- * [6290324582,5]   0x00effd6b5000..00effd6fffff : ibm,hbrt-target-image
- * [6290330588,5]   0x00effd700000..00effd7fffff : ibm,hbrt-vpd-image
-*/
 static int opal_prd_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct opal_prd_range *range;
@@ -236,11 +231,12 @@ static long opal_prd_ioctl(struct file *file, unsigned int cmd,
 
 	case OPAL_PRD_SCOM_READ:
 		rc = copy_from_user(&scom, (void __user *)param, sizeof(scom));
-		if (!rc)
+		if (rc)
 			return -EFAULT;
 
 		rc = opal_xscom_read(scom.chip, scom.addr,
 				(__be64 *)&scom.data);
+		scom.data = be64_to_cpu(scom.data);
 		pr_debug("ioctl SCOM_READ: chip %llx addr %016llx "
 				"data %016llx rc %d\n",
 				scom.chip, scom.addr, scom.data, rc);
@@ -390,8 +386,8 @@ static int parse_regions(void)
 		if (!is_prd_range(name))
 			continue;
 
-		addr = of_read_number(ranges_prop, i * 4);
-		size = PAGE_ALIGN(of_read_number(ranges_prop, i * 4 + 2));
+		addr = of_read_number(ranges_prop + (i * 4) + 0, 2);
+		size = PAGE_ALIGN(of_read_number(ranges_prop + (i * 4) + 2, 2));
 
 		if (addr & (PAGE_SIZE - 1)) {
 			pr_warn("skipping range %s: not page-aligned\n",
@@ -406,6 +402,8 @@ static int parse_regions(void)
 					OPAL_PRD_RANGE_NAME_LEN - 1);
 			ranges[n].physaddr = addr;
 			ranges[n].size = size;
+			pr_info("Name %s addr 0x%016llx size 0x%016llx\n", ranges[n].name,
+					ranges[n].physaddr, ranges[n].size);
 			n++;
 		}
 	}
