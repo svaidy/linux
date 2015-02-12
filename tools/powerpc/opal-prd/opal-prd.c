@@ -220,10 +220,8 @@ int hservice_set_page_execute(void *addr)
 
 int hservice_clock_gettime(clockid_t i_clkId, struct timespec *o_tp)
 {
-	printf("FIXME:Calling ........hservice_clock_gettime()\n");
-	return -1;
+	return clock_gettime(i_clkId, o_tp);
 }
-
 
 int hservice_pnor_read(uint32_t i_proc, const char* i_partitionName,
 		uint64_t i_offset, void* o_data, size_t i_sizeBytes)
