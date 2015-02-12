@@ -52,8 +52,9 @@ static struct opal_prd_range *find_range_by_addr(uint64_t addr)
 
 	for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
 		range = &ranges[i];
-		if (addr >= range->physaddr &&
-				addr < range->physaddr + range->size)
+		if (addr >= _ALIGN_DOWN(range->physaddr, PAGE_SIZE) &&
+				addr < range->physaddr + range->size &&
+				addr + PAGE_SIZE < range->physaddr + range->size)
 			return range;
 	}
 
@@ -94,11 +95,15 @@ static int opal_prd_mmap(struct file *file, struct vm_area_struct *vma)
 
 	/* ensure we're mapping within one of the allowable ranges */
 	range = find_range_by_addr(addr);
-	if (!range)
+	if (!range) {
+		pr_debug("opal_prd_mmap range not found\n");
 		return -EINVAL;
+	}
 
-	if (addr + size > range->physaddr + range->size)
+	if (addr + size > range->physaddr + range->size) {
+		pr_debug("opal_prd_mmap addr + size out of bound\n");
 		return -EINVAL;
+	}
 
 	vma->vm_page_prot = phys_mem_access_prot(file, vma->vm_pgoff,
 						 size, vma->vm_page_prot)
@@ -390,9 +395,8 @@ static int parse_regions(void)
 		size = PAGE_ALIGN(of_read_number(ranges_prop + (i * 4) + 2, 2));
 
 		if (addr & (PAGE_SIZE - 1)) {
-			pr_warn("skipping range %s: not page-aligned\n",
+			pr_warn("range %s: not page-aligned\n",
 					name);
-			continue;
 		}
 
 		if (n == OPAL_PRD_MAX_RANGES) {
