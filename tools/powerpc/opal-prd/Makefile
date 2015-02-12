@@ -1,5 +1,5 @@
 CC = $(CROSS_COMPILE)gcc
-CFLAGS=-O0 -Werror -g2 -I. -I../../../arch/powerpc/include/
+CFLAGS=-O0 -Werror -Wall -g2 -I. -I../../../arch/powerpc/include/
 
 opal-prd: opal-prd.o thunk.o
 	$(CC) $(CFLAGS) -o $@ $^

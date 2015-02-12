@@ -148,9 +148,9 @@ int hservice_scom_write(uint64_t chip_id, uint64_t addr,
 uint64_t hservice_get_reserved_mem(const char *name)
 {
 	struct opal_prd_range *code_range = NULL;
-	uint64_t addr;
-	int i, rc;
 	uint64_t align_physaddr, offset;
+	void *addr;
+	int i;
 
 	printf("hservice_get_reserved_mem: %s\n", name);
 
@@ -180,40 +180,43 @@ uint64_t hservice_get_reserved_mem(const char *name)
 		return 0;
 	}
 
-	printf("hservice_get_reserved_mem: %s address %016llx\n", name, addr);
-	if (addr) {
-		return addr + offset;
-	}
+	printf("hservice_get_reserved_mem: %s address %p\n", name, addr);
+	if (addr)
+		return (uint64_t)addr + offset;
 
 	return 0;
 }
 
 void hservice_nanosleep(uint64_t i_seconds, uint64_t i_nano_seconds)
 {
-    printf("FIXME:Calling ........hservice_nanosleep()\n");
+	printf("FIXME:Calling ........hservice_nanosleep()\n");
 }
 
 int hservice_set_page_execute(void *addr)
 {
-    printf("FIXME:Calling ........hservice_set_page_execute()\n");
+	printf("FIXME:Calling ........hservice_set_page_execute()\n");
+	return -1;
 }
 
 int hservice_clock_gettime(clockid_t i_clkId, struct timespec *o_tp)
 {
-    printf("FIXME:Calling ........hservice_clock_gettime()\n");
+	printf("FIXME:Calling ........hservice_clock_gettime()\n");
+	return -1;
 }
 
 
 int hservice_pnor_read(uint32_t i_proc, const char* i_partitionName,
 		uint64_t i_offset, void* o_data, size_t i_sizeBytes)
 {
-    printf("FIXME:Calling ........hservice_pnor_read()\n");
+	printf("FIXME:Calling ........hservice_pnor_read()\n");
+	return -1;
 }
 
 int hservice_pnor_write(uint32_t i_proc, const char* i_partitionName,
 		uint64_t i_offset, void* o_data, size_t i_sizeBytes)
 {
-    printf("FIXME:Calling ........hservice_pnor_write()\n");
+	printf("FIXME:Calling ........hservice_pnor_write()\n");
+	return -1;
 }
 
 int hservice_i2c_read(uint64_t i_master, uint8_t i_engine, uint8_t i_port,
@@ -246,31 +249,29 @@ int hservice_memory_error(uint64_t i_start_addr, uint64_t i_endAddr,
 	return -1;
 }
 
-bool hservices_init(void *mamaddr)
+void hservices_init(void *code)
 {
-	void *code = NULL;
-	struct runtime_interfaces *(*hbrt_init)(struct host_interfaces *);
-	int i, sz;
 	uint64_t *s, *d;
+	int i, sz;
 
-	code  =  (void *)mamaddr;
-	printf("code Address : [%016p]\n",code);
+	printf("code Address : [%p]\n", code);
 
 	/* We enter at 0x100 into the image. */
 	/* Load func desc in BE since we reverse it in thunk */
 
-	hbrt_entry.addr = htobe64(code + 0x100);
+	hbrt_entry.addr = (void *)htobe64((unsigned long)code + 0x100);
 	hbrt_entry.toc = 0; /* No toc for init entry point */
 
 	if (memcmp(code, "HBRTVERS", 8) != 0) {
-		printf("HBRT: Bad signature for ibm,hbrt-code-image! exiting\n");
+		printf("HBRT: Bad signature for ibm,hbrt-code-image!"
+				"exiting\n");
 		exit(-1);
 	}
 
-	printf("HBRT: calling ibm,hbrt_init() %p!!!!\n",hservice_runtime);
+	printf("HBRT: calling ibm,hbrt_init() %p\n", hservice_runtime);
 	hservice_runtime = call_hbrt_init(&hinterface);
-	printf("HBRT: hbrt_init passed..... %p version %p!!!!\n", hservice_runtime,
-		hservice_runtime->interface_version);
+	printf("HBRT: hbrt_init passed..... %p version %016lx\n",
+			hservice_runtime, hservice_runtime->interface_version);
 
 	sz = sizeof(struct runtime_interfaces)/sizeof(uint64_t);
 	s = (uint64_t *)hservice_runtime;
@@ -278,7 +279,8 @@ bool hservices_init(void *mamaddr)
 	/* Byte swap the function pointers */
 	for (i = 0; i < sz; i++) {
 		d[i] = be64toh(s[i]);
-		printf(" 	hservice_runtime_fixed[%d] = %p\n", i, d[i]);
+		printf(" 	hservice_runtime_fixed[%d] = %016lx\n",
+				i, d[i]);
 	}
 
 }
@@ -330,8 +332,7 @@ int main(int argc, char *argv[])
 {
 	int hb, rc, i;
 	size_t sz;
-	uint64_t mapped_addr;
-	unsigned long hbrt_size;
+	void *mapped_addr;
 	unsigned long *p;
 	char *hostboot_file_name=NULL;
 	struct stat hb_stat;
@@ -339,7 +340,7 @@ int main(int argc, char *argv[])
 	void *hb_mapped;
 	uint64_t val;
 	struct opal_prd_range *code_range = NULL;
-	uint64_t align_physaddr, offset;
+	uint64_t align_physaddr;
 
 	/* Parse options */
 	while(1) {
@@ -357,7 +358,8 @@ int main(int argc, char *argv[])
 			hb_file = 1;
 			break;
 		case 'h':
-			printf("Usage: %s --hostboot <hostboot.bin file> \n");
+			printf("Usage: %s --hostboot <hostboot.bin file> \n",
+					argv[0]);
 			printf("By default use image from memory\n");
 		}
 	}
@@ -387,7 +389,7 @@ int main(int argc, char *argv[])
 			exit(-1);
 		}
 		sz = hb_stat.st_size;
-		printf("Hostboot file size %d bytes\n", sz);
+		printf("Hostboot file size %zd bytes\n", sz);
 		/* Get page aligned executable memory */
 		hb_mapped = mmap(0, sz, PROT_WRITE|PROT_READ|PROT_EXEC,
 				MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
@@ -402,14 +404,14 @@ int main(int argc, char *argv[])
 			exit(-1);
 		}
 		p = (unsigned long *)hb_mapped;
-		printf("Addr %016llx Data %08llx\n", hb_mapped, hb_mapped);
-		printf("Addr %016llx String %s\n", hb_mapped, hb_mapped);
+		printf("Addr %p String %s\n", p, (char *)hb_mapped);
 
 	} else {
 
 		/* Search for HBRT code region */
 		for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
-			if  (!strcmp(info.ranges[i].name, HBRT_CODE_REGION_NAME)) {
+			if  (!strcmp(info.ranges[i].name,
+						HBRT_CODE_REGION_NAME)) {
 				code_range = &info.ranges[i];
 				break;
 			}
@@ -420,12 +422,10 @@ int main(int argc, char *argv[])
 			exit(-1);
 		}
 
-
 		printf("Mapping 0x%016lx 0x%08lx %s\n", code_range->physaddr,
 			code_range->size, code_range->name);
 
 		align_physaddr = code_range->physaddr & ~(page_size-1);
-		offset = code_range->physaddr & (page_size-1);
 
 		mapped_addr = mmap(NULL, code_range->size,
 				PROT_WRITE|PROT_READ|PROT_EXEC,
@@ -436,15 +436,7 @@ int main(int argc, char *argv[])
 			exit(-1);
 		}
 
-		user_mapped_base_addr = mapped_addr;
-
-		p = (unsigned long *) (mapped_addr | offset);
-		printf("Addr %016llx Data %08llx\n", &p[0], &p[0]);
-		printf("Addr %016llx String %s\n", &p[0], &p[0]);
-
-		printf("Addr %016llx Data %016llx\n", &p[0x2000/8], p[0x2000/8]);
-		printf("Addr %016llx Data %016llx\n", &p[0x2008/8], p[0x2008/8]);
-
+		user_mapped_base_addr = (unsigned long)mapped_addr;
 	}
 
 	fixup_hinterface_table();
