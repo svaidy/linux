@@ -27,10 +27,18 @@
 
 #include "hostboot-interface.h"
 
-static int opald_fd;
-static uint64_t page_size;
-static struct opal_prd_info info;
-#define HBRT_CODE_REGION_NAME "ibm,hbrt-code-image"
+struct opal_prd_ctx {
+	int			fd;
+	struct opal_prd_info	info;
+	long			page_size;
+	void			*code_addr;
+	size_t			code_size;
+};
+
+static struct opal_prd_ctx *ctx;
+
+static const char *opal_prd_devnode = "/dev/opal-prd";
+static const char *hbrt_code_region_name = "ibm,hbrt-code-image";
 
 /* This is the "real" HBRT call table for calling into HBRT as
  * provided by it. It will be used by the assembly thunk
@@ -46,6 +54,21 @@ struct func_desc {
 	void *addr;
 	void *toc;
 } hbrt_entry;
+
+static struct opal_prd_range *find_range(const char *name)
+{
+	struct opal_prd_range *range;
+	unsigned int i;
+
+	for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
+		range = &ctx->info.ranges[i];
+
+		if (!strncmp(range->name, name, sizeof(range->name)))
+			return range;
+	}
+
+	return NULL;
+}
 
 /* HBRT init wrappers */
 extern struct runtime_interfaces *call_hbrt_init(struct host_interfaces *);
@@ -110,7 +133,7 @@ int hservice_scom_read(uint64_t chip_id, uint64_t addr, void *buf)
 	scom.chip = chip_id;
 	scom.addr = addr;
 
-	rc = ioctl(opald_fd, OPAL_PRD_SCOM_READ, &scom);
+	rc = ioctl(ctx->fd, OPAL_PRD_SCOM_READ, &scom);
 	if (rc) {
 		perror("ioctl scom_read");
 		return 0;
@@ -134,7 +157,7 @@ int hservice_scom_write(uint64_t chip_id, uint64_t addr,
 	/* Copy byte by byte to avoid endian flip */
 	memcpy(&scom.data, buf, sizeof(uint64_t));
 
-	rc = ioctl(opald_fd, OPAL_PRD_SCOM_WRITE, &scom);
+	rc = ioctl(ctx->fd, OPAL_PRD_SCOM_WRITE, &scom);
 	if (rc) {
 		perror("ioctl scom_write");
 		return 0;
@@ -147,33 +170,25 @@ int hservice_scom_write(uint64_t chip_id, uint64_t addr,
 
 uint64_t hservice_get_reserved_mem(const char *name)
 {
-	struct opal_prd_range *code_range = NULL;
 	uint64_t align_physaddr, offset;
+	struct opal_prd_range *range;
 	void *addr;
-	int i;
 
 	printf("hservice_get_reserved_mem: %s\n", name);
 
-	/* Search for requested region */
-	for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
-		if  (!strcmp(info.ranges[i].name, name)) {
-			code_range = &info.ranges[i];
-			break;
-		}
+	range = find_range(name);
+	if (!range) {
+		printf("no such range %s", name);
+		return 0;
 	}
 
-	if (!code_range)
-		return 0;
+	printf("Mapping 0x%016lx 0x%08lx %s\n", range->physaddr, range->size,
+			range->name);
 
-
-	printf("Mapping 0x%016lx 0x%08lx %s\n", code_range->physaddr,
-			code_range->size, code_range->name);
-
-	align_physaddr = code_range->physaddr & ~(page_size-1);
-	offset = code_range->physaddr & (page_size-1);
-	addr = mmap(NULL, code_range->size,
-				PROT_WRITE|PROT_READ|PROT_EXEC,
-				MAP_PRIVATE, opald_fd, align_physaddr);
+	align_physaddr = range->physaddr & ~(ctx->page_size-1);
+	offset = range->physaddr & (ctx->page_size-1);
+	addr = mmap(NULL, range->size, PROT_WRITE | PROT_READ,
+				MAP_PRIVATE, ctx->fd, align_physaddr);
 
 	if (addr == MAP_FAILED) {
 		perror("mmap");
@@ -308,27 +323,7 @@ static void fixup_hinterface_table(void)
 	}
 }
 
-
-static unsigned long get_region_info()
-{
-	int rc;
-	int i;
-
-	rc = ioctl(opald_fd, OPAL_PRD_GET_INFO, &info);
-	if (rc) {
-		perror("ioctl get info");
-		return rc;
-	}
-
-	for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
-		printf("\t0x%016lx 0x%08lx %s\n", info.ranges[i].physaddr,
-				info.ranges[i].size, info.ranges[i].name);
-	}
-
-	return 0;
-}
-
-static int map_hbrt_file(const char *name, void **bufp, size_t *sizep)
+static int map_hbrt_file(struct opal_prd_ctx *ctx, const char *name)
 {
 	struct stat statbuf;
 	int fd, rc;
@@ -356,27 +351,12 @@ static int map_hbrt_file(const char *name, void **bufp, size_t *sizep)
 		return -1;
 	}
 
-	*bufp = buf;
-	*sizep = statbuf.st_size;
+	ctx->code_addr = buf;
+	ctx->code_size = statbuf.st_size;
 	return -0;
 }
 
-static struct opal_prd_range *find_range(const char *name)
-{
-	struct opal_prd_range *range;
-	unsigned int i;
-
-	for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
-		range = &info.ranges[i];
-
-		if (!strncmp(range->name, name, sizeof(range->name)))
-			return range;
-	}
-
-	return NULL;
-}
-
-static int map_hbrt_physmem(const char *name, void **bufp, size_t *sizep)
+static int map_hbrt_physmem(struct opal_prd_ctx *ctx, const char *name)
 {
 	struct opal_prd_range *range;
 	void *buf;
@@ -388,14 +368,36 @@ static int map_hbrt_physmem(const char *name, void **bufp, size_t *sizep)
 	}
 
 	buf = mmap(NULL, range->size, PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_PRIVATE, opald_fd, range->physaddr);
+			MAP_PRIVATE, ctx->fd, range->physaddr);
 	if (buf == MAP_FAILED) {
 		warn("mmap(range:%s)\n", name);
 		return -1;
 	}
 
-	*bufp = buf;
-	*sizep = range->size;
+	ctx->code_addr = buf;
+	ctx->code_size = range->size;
+	return 0;
+}
+
+static int prd_init(struct opal_prd_ctx *ctx)
+{
+	int rc;
+
+	ctx->page_size = sysconf(_SC_PAGE_SIZE);
+
+	/* set up the device, and do our get_info ioctl */
+	ctx->fd = open(opal_prd_devnode, O_RDWR);
+	if (ctx->fd < 0) {
+		warn("Can't open PRD device %s\n", opal_prd_devnode);
+		return -1;
+	}
+
+	rc = ioctl(ctx->fd, OPAL_PRD_GET_INFO, &ctx->info);
+	if (rc) {
+		warn("Can't get PRD info");
+		return -1;
+	}
+
 	return 0;
 }
 
@@ -405,8 +407,7 @@ static int map_hbrt_physmem(const char *name, void **bufp, size_t *sizep)
 int main(int argc, char *argv[])
 {
 	char *hbrt_filename = NULL;
-	size_t hbrt_size;
-	void *hbrt_addr;
+	struct opal_prd_ctx _ctx;
 	uint64_t val;
 	int rc;
 
@@ -431,36 +432,29 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	page_size = sysconf(_SC_PAGE_SIZE);
+	ctx = &_ctx;
+	rc = prd_init(ctx);
+	if (rc)
+		err(EXIT_FAILURE, "Error initialising PRD setup");
 
-	if ((opald_fd=open("/dev/opal-prd", O_RDWR))<0) {
-		perror("open");
-		exit(-1);
-	}
-
-	rc = get_region_info();
-	if (rc) {
-		printf("Error getting region info\n");
-		exit(-1);
-	}
 
 	if (hbrt_filename) {
-		rc = map_hbrt_file(hbrt_filename, &hbrt_addr, &hbrt_size);
+		rc = map_hbrt_file(ctx, hbrt_filename);
 		if (rc)
 			err(EXIT_FAILURE, "can't access hbrt file %s",
 					hbrt_filename);
 	} else {
-		rc = map_hbrt_physmem(HBRT_CODE_REGION_NAME, &hbrt_addr, &hbrt_size);
+		rc = map_hbrt_physmem(ctx, hbrt_code_region_name);
 		if (rc)
 			err(EXIT_FAILURE, "can't access hbrt physical memory");
 	}
 
-	printf("hbrt map at %p, size 0x%zx\n", hbrt_addr, hbrt_size);
+	printf("hbrt map at %p, size 0x%zx\n", ctx->code_addr, ctx->code_size);
 
 	fixup_hinterface_table();
 
 	printf("calling hservices_init\n");
-	hservices_init(hbrt_addr);
+	hservices_init(ctx->code_addr);
 
 	//printf("calling hservice_runtime->loadOCC()\n");
 	//rc = hservice_runtime->loadOCC(0, 0,0,0,0);
@@ -486,7 +480,8 @@ int main(int argc, char *argv[])
 
 	/* FIXME: Track and unmap */
 
-	close(opald_fd);
+	close(ctx->fd);
+
 	return(0);
 }
 
