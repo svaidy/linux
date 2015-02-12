@@ -67,13 +67,15 @@ call_##name:					;\
 	/* Instanciate call to HBRT thunks */
 	CALL_THUNK(cxxtestExecute, 1)
 	CALL_THUNK(get_lid_list, 2)
-	CALL_THUNK(loadOCC, 3)
-	CALL_THUNK(startOCCs, 4)
-	CALL_THUNK(stopOCCs, 5)
-	CALL_THUNK(occ_error, 6)
+	CALL_THUNK(occ_load, 3)
+	CALL_THUNK(occ_start, 4)
+	CALL_THUNK(occ_stop, 5)
+	CALL_THUNK(process_occ_error, 6)
 	CALL_THUNK(enable_attns, 7)
 	CALL_THUNK(disable_attns, 8)
 	CALL_THUNK(handle_attns, 9)
+	CALL_THUNK(enable_occ_actuation, 10)
+	CALL_THUNK(process_occ_reset, 11)
 
 	.globl call_hbrt_init
 call_hbrt_init:
@@ -154,10 +156,14 @@ hinterface:
 	CALLBACK_THUNK(hservice_get_reserved_mem)
 	CALLBACK_THUNK(hservice_wakeup)
 	CALLBACK_THUNK(hservice_nanosleep)
-	CALLBACK_THUNK(hservice_report_failure)
+	CALLBACK_THUNK(hservice_report_occ_failure)
 	CALLBACK_THUNK(hservice_clock_gettime)
 	CALLBACK_THUNK(hservice_pnor_read)
 	CALLBACK_THUNK(hservice_pnor_write)
+	CALLBACK_THUNK(hservice_i2c_read)
+	CALLBACK_THUNK(hservice_i2c_write)
+	CALLBACK_THUNK(hservice_ipmi_msg)
+	CALLBACK_THUNK(hservice_memory_error)
 	/* Reserved space for future growth */
 	.space 32*8,0
 	/* Eye catcher for debugging */

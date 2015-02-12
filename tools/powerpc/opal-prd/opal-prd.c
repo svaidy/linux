@@ -53,22 +53,28 @@ extern struct runtime_interfaces *call_hbrt_init(struct host_interfaces *);
 /* hservice Call wrappers */
 
 extern void call_cxxtestExecute(void *);
-extern const uint32_t * call_get_lid_list(size_t * o_num);
-extern int call_loadOCC(uint64_t i_homer_addr_phys,
-			uint64_t i_homer_addr_va,
-			uint64_t i_common_addr_phys,
-			uint64_t i_common_addr_va,
-			uint64_t i_chip);
-extern int call_startOCCs(uint64_t* i_chip,
-			  size_t i_num_chips);
-extern int call_stopOCCs(uint64_t* i_chip,
-			 size_t i_num_chips);
-
 extern int call_handle_attns(uint64_t i_proc,
 			uint64_t i_ipollStatus,
 			uint64_t i_ipollMask);
+extern void call_process_occ_error (uint64_t i_chipId);
+extern int call_enable_attns(void);
+extern int call_enable_occ_actuation(bool i_occActivation);
+extern void call_process_occ_reset(uint64_t i_chipId);
 
 /* Dummy calls for hservices */
+static inline void __fsp_only_assert(const char *name)
+{
+	printf("error: %s is only implemented for FSP\n", name);
+	exit(EXIT_FAILURE);
+}
+#define fsp_stub(name) \
+	void hservice_ ##name(void) { __fsp_only_assert(#name); }
+
+fsp_stub(send_error_log);
+fsp_stub(lid_load);
+fsp_stub(lid_unload);
+fsp_stub(wakeup);
+fsp_stub(report_occ_failure);
 
 void hservice_puts(const char *str)
 {
@@ -95,13 +101,6 @@ void *hservice_realloc(void *ptr, size_t size)
 {
 	return realloc(ptr, size);
 }
-
-int hservice_send_error_log(uint32_t plid, uint32_t dsize, void *data)
-{
-	printf("FIXME: Calling ........hservice_send_error_log()\n");
-	return 0;
-}
-
 
 int hservice_scom_read(uint64_t chip_id, uint64_t addr, void *buf)
 {
@@ -143,18 +142,6 @@ int hservice_scom_write(uint64_t chip_id, uint64_t addr,
 
 	printf("scom write: chip %lx addr %lx val %lx\n", chip_id, addr, scom.data);
 
-	return 0;
-}
-
-int hservice_lid_load(uint32_t lid, void **buf, size_t *len)
-{
-	printf("FIXME: Calling ........hservice_lid_load()\n");
-	return 0;
-}
-
-int hservice_lid_unload(void *buf)
-{
-	printf("FIXME: Calling ........hservice_lid_unload()\n");
 	return 0;
 }
 
@@ -206,35 +193,16 @@ void hservice_nanosleep(uint64_t i_seconds, uint64_t i_nano_seconds)
     printf("FIXME:Calling ........hservice_nanosleep()\n");
 }
 
-int hservice_set_special_wakeup()
-{
-    printf("FIXME:Calling ........hservice_set_special_wakeup()\n");
-}
-
-int hservice_clr_special_wakeup()
-{
-    printf("FIXME:Calling ........hservice_clr_special_wakeup()\n");
-}
-
-int hservice_wakeup(uint32_t i_core, uint32_t i_mode)
-{
-    printf("FIXME:Calling ........hservice_set_wakeup()\n");
-}
-
 int hservice_set_page_execute(void *addr)
 {
     printf("FIXME:Calling ........hservice_set_page_execute()\n");
-}
-
-void hservice_report_failure( uint64_t i_status, uint64_t i_partId )
-{
-    printf("FIXME:Calling ........hservice_report_failure()\n");
 }
 
 int hservice_clock_gettime(clockid_t i_clkId, struct timespec *o_tp)
 {
     printf("FIXME:Calling ........hservice_clock_gettime()\n");
 }
+
 
 int hservice_pnor_read(uint32_t i_proc, const char* i_partitionName,
 		uint64_t i_offset, void* o_data, size_t i_sizeBytes)
@@ -248,6 +216,35 @@ int hservice_pnor_write(uint32_t i_proc, const char* i_partitionName,
     printf("FIXME:Calling ........hservice_pnor_write()\n");
 }
 
+int hservice_i2c_read(uint64_t i_master, uint8_t i_engine, uint8_t i_port,
+		uint16_t i_devAddr, uint32_t i_offsetSize, uint32_t i_offset,
+		uint32_t i_length, void* o_data)
+{
+	printf("FIXME: %s\n", __func__);
+	return -1;
+}
+
+int hservice_i2c_write(uint64_t i_master, uint8_t i_engine, uint8_t i_port,
+		uint16_t i_devAddr, uint32_t i_offsetSize, uint32_t i_offset,
+		uint32_t i_length, void* i_data)
+{
+	printf("FIXME: %s\n", __func__);
+	return -1;
+}
+
+int hservice_ipmi_msg(void *tx_buf, size_t tx_size,
+		void *rx_buf, size_t *rx_size)
+{
+	printf("FIXME: %s\n", __func__);
+	return -1;
+}
+
+int hservice_memory_error(uint64_t i_start_addr, uint64_t i_endAddr,
+		enum MemoryError_t i_errorType)
+{
+	printf("FIXME: %s\n", __func__);
+	return -1;
+}
 
 bool hservices_init(void *mamaddr)
 {
