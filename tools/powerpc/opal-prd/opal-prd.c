@@ -204,7 +204,12 @@ uint64_t hservice_get_reserved_mem(const char *name)
 
 void hservice_nanosleep(uint64_t i_seconds, uint64_t i_nano_seconds)
 {
-	printf("FIXME:Calling ........hservice_nanosleep()\n");
+	const struct timespec ns = {
+		.tv_sec = i_seconds,
+		.tv_nsec = i_nano_seconds
+	};
+
+	nanosleep(&ns, NULL);
 }
 
 int hservice_set_page_execute(void *addr)
