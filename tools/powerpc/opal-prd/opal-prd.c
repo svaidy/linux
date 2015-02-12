@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <time.h>
+#include <err.h>
 
 #include <endian.h>
 
@@ -26,7 +27,6 @@
 
 #include "hostboot-interface.h"
 
-static uint64_t user_mapped_base_addr;
 static int opald_fd;
 static uint64_t page_size;
 static struct opal_prd_info info;
@@ -328,19 +328,87 @@ static unsigned long get_region_info()
 	return 0;
 }
 
+static int map_hbrt_file(const char *name, void **bufp, size_t *sizep)
+{
+	struct stat statbuf;
+	int fd, rc;
+	void *buf;
+
+	fd = open(name, O_RDONLY);
+	if (fd < 0) {
+		warn("open(%s)", name);
+		return -1;
+	}
+
+	rc = fstat(fd, &statbuf);
+	if (rc < 0) {
+		warn("fstat(%s)", name);
+		close(fd);
+		return -1;
+	}
+
+	buf = mmap(NULL, statbuf.st_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+			MAP_PRIVATE, fd, 0);
+	close(fd);
+
+	if (buf == MAP_FAILED) {
+		warn("mmap(%s)", name);
+		return -1;
+	}
+
+	*bufp = buf;
+	*sizep = statbuf.st_size;
+	return -0;
+}
+
+static struct opal_prd_range *find_range(const char *name)
+{
+	struct opal_prd_range *range;
+	unsigned int i;
+
+	for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
+		range = &info.ranges[i];
+
+		if (!strncmp(range->name, name, sizeof(range->name)))
+			return range;
+	}
+
+	return NULL;
+}
+
+static int map_hbrt_physmem(const char *name, void **bufp, size_t *sizep)
+{
+	struct opal_prd_range *range;
+	void *buf;
+
+	range = find_range(name);
+	if (!range) {
+		warn("can't find code region %s\n", name);
+		return -1;
+	}
+
+	buf = mmap(NULL, range->size, PROT_READ | PROT_WRITE | PROT_EXEC,
+			MAP_PRIVATE, opald_fd, range->physaddr);
+	if (buf == MAP_FAILED) {
+		warn("mmap(range:%s)\n", name);
+		return -1;
+	}
+
+	*bufp = buf;
+	*sizep = range->size;
+	return 0;
+}
+
+
+
+
 int main(int argc, char *argv[])
 {
-	int hb, rc, i;
-	size_t sz;
-	void *mapped_addr;
-	unsigned long *p;
-	char *hostboot_file_name=NULL;
-	struct stat hb_stat;
-	int hb_file = 0;
-	void *hb_mapped;
+	char *hbrt_filename = NULL;
+	size_t hbrt_size;
+	void *hbrt_addr;
 	uint64_t val;
-	struct opal_prd_range *code_range = NULL;
-	uint64_t align_physaddr;
+	int rc;
 
 	/* Parse options */
 	while(1) {
@@ -353,9 +421,8 @@ int main(int argc, char *argv[])
 			break;
 		switch (c) {
 		case 'f':
-			hostboot_file_name = optarg;
-			printf("Using hostboot file: %s\n", hostboot_file_name);
-			hb_file = 1;
+			hbrt_filename = optarg;
+			printf("Using hostboot file: %s\n", hbrt_filename);
 			break;
 		case 'h':
 			printf("Usage: %s --hostboot <hostboot.bin file> \n",
@@ -377,78 +444,23 @@ int main(int argc, char *argv[])
 		exit(-1);
 	}
 
-	if (hb_file) {
-		if ((hb = open(hostboot_file_name, O_RDONLY)) < 0) {
-			perror("Hostboot file");
-			exit(-1);
-		}
-		/* Load HB code from file */
-		rc = fstat(hb, &hb_stat);
-		if (rc) {
-			perror("Hostboot file");
-			exit(-1);
-		}
-		sz = hb_stat.st_size;
-		printf("Hostboot file size %zd bytes\n", sz);
-		/* Get page aligned executable memory */
-		hb_mapped = mmap(0, sz, PROT_WRITE|PROT_READ|PROT_EXEC,
-				MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-		if (!hb_mapped) {
-			perror("Hostboot malloc");
-			exit(-1);
-		}
-
-		rc = read(hb, hb_mapped, sz);
-		if (rc < 0) {
-			perror("Hostboot read");
-			exit(-1);
-		}
-		p = (unsigned long *)hb_mapped;
-		printf("Addr %p String %s\n", p, (char *)hb_mapped);
-
+	if (hbrt_filename) {
+		rc = map_hbrt_file(hbrt_filename, &hbrt_addr, &hbrt_size);
+		if (rc)
+			err(EXIT_FAILURE, "can't access hbrt file %s",
+					hbrt_filename);
 	} else {
-
-		/* Search for HBRT code region */
-		for (i = 0; i < OPAL_PRD_MAX_RANGES; i++) {
-			if  (!strcmp(info.ranges[i].name,
-						HBRT_CODE_REGION_NAME)) {
-				code_range = &info.ranges[i];
-				break;
-			}
-		}
-
-		if (!code_range) {
-			printf("Unable to get code area\n");
-			exit(-1);
-		}
-
-		printf("Mapping 0x%016lx 0x%08lx %s\n", code_range->physaddr,
-			code_range->size, code_range->name);
-
-		align_physaddr = code_range->physaddr & ~(page_size-1);
-
-		mapped_addr = mmap(NULL, code_range->size,
-				PROT_WRITE|PROT_READ|PROT_EXEC,
-				MAP_PRIVATE, opald_fd, align_physaddr);
-
-		if (mapped_addr == MAP_FAILED) {
-			perror("mmap");
-			exit(-1);
-		}
-
-		user_mapped_base_addr = (unsigned long)mapped_addr;
+		rc = map_hbrt_physmem(HBRT_CODE_REGION_NAME, &hbrt_addr, &hbrt_size);
+		if (rc)
+			err(EXIT_FAILURE, "can't access hbrt physical memory");
 	}
+
+	printf("hbrt map at %p, size 0x%zx\n", hbrt_addr, hbrt_size);
 
 	fixup_hinterface_table();
 
 	printf("calling hservices_init\n");
-	if (hb_file) {
-		/* Use ibm,hbrt-code-image from file, rest from memory */
-		hservices_init(hb_mapped);
-	} else {
-		/* Use all sections from memory */
-		hservices_init(&p[0]);
-	}
+	hservices_init(hbrt_addr);
 
 	//printf("calling hservice_runtime->loadOCC()\n");
 	//rc = hservice_runtime->loadOCC(0, 0,0,0,0);
